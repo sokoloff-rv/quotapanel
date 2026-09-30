@@ -271,11 +271,12 @@ class TaskbarPanel(QWidget):
         name_width = 49
         column_gap = 8
         column_width = (self.width() - name_width - 22 - column_gap) / 2
-        height = self.height() / 2
+        padding = 4
+        height = (self.height() - padding * 2) / 2
         foreground = QColor("#252b35" if self._light else "#edf1f7")
         muted = QColor("#667181" if self._light else "#a4adba")
         for index, snapshot in enumerate(self._state.ordered()[:2]):
-            top = index * height
+            top = padding + index * height
             painter.setPen(foreground)
             painter.drawText(
                 QRectF(10, top, name_width, height),
@@ -294,7 +295,7 @@ class TaskbarPanel(QWidget):
             for column, (value, tone) in enumerate(values):
                 left = 10 + name_width + column * (column_width + column_gap)
                 metrics = QFontMetrics(font)
-                label = "5ч" if column == 0 else "7д"
+                label = "5ч:" if column == 0 else "7д:"
                 label_width = metrics.horizontalAdvance(label)
                 painter.setPen(muted)
                 painter.drawText(
@@ -321,11 +322,11 @@ class TaskbarPanel(QWidget):
                 )
                 window = primary_windows(snapshot)[column]
                 countdown = reset_countdown(window.resets_at if window else None)
-                reset_left = value_left + value_width + 6
+                reset_left = value_left + value_width + 4
                 reset_width = max(0, left + column_width - reset_left)
                 painter.setPen(muted)
                 reset_text = metrics.elidedText(
-                    "↻" + countdown, Qt.TextElideMode.ElideRight, round(reset_width)
+                    f"({countdown})", Qt.TextElideMode.ElideRight, round(reset_width)
                 )
                 painter.drawText(
                     QRectF(reset_left, top, reset_width, height),

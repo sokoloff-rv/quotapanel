@@ -62,8 +62,8 @@ def test_expired_credentials_cannot_look_like_zero_usage() -> None:
 def test_countdown_does_not_show_zero_before_reset() -> None:
     now = datetime(2026, 10, 1, tzinfo=UTC)
     assert reset_countdown(now + timedelta(seconds=30), now) == "1м"
-    assert reset_countdown(now + timedelta(hours=2, minutes=14), now) == "2ч14м"
-    assert reset_countdown(now + timedelta(days=3, hours=7), now) == "3д7ч"
+    assert reset_countdown(now + timedelta(hours=2, minutes=14), now) == "2ч 14м"
+    assert reset_countdown(now + timedelta(days=3, hours=7), now) == "3д 7ч"
     assert reset_countdown(now - timedelta(seconds=1), now) == "сейчас"
     assert reset_countdown(None, now) == "—"
 

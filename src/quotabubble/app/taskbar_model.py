@@ -33,9 +33,9 @@ def reset_countdown(resets_at: datetime | None, now: datetime | None = None) -> 
     days, remainder = divmod(minutes, 1440)
     hours, mins = divmod(remainder, 60)
     if days:
-        return f"{days}д{hours}ч" if hours else f"{days}д"
+        return f"{days}д {hours}ч" if hours else f"{days}д"
     if hours:
-        return f"{hours}ч{mins:02d}м"
+        return f"{hours}ч {mins:02d}м"
     return f"{mins}м"
 
 
