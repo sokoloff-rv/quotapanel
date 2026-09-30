@@ -147,6 +147,32 @@ def test_popup_geometry_is_stable_on_first_show_and_countdown_ticks(qapp) -> Non
         panel.close()
 
 
+def test_details_use_desktop_coordinates_when_panel_geometry_is_parent_relative(qapp, monkeypatch):
+    from PySide6.QtCore import QPoint
+
+    from quotabubble.app.state import AppState
+    from quotabubble.app.taskbar_main import demo_snapshots
+    from quotabubble.app.taskbar_settings import PanelSettings
+    from quotabubble.ui.taskbar_panel import TaskbarPanel
+
+    state = AppState()
+    state.replace(demo_snapshots())
+    panel = TaskbarPanel(state, PanelSettings(), preview=True)
+    area = panel.screen().availableGeometry()
+    desktop_origin = QPoint(area.left() + 10, area.bottom() - 44)
+    panel.setGeometry(10, 2, 280, 44)
+    monkeypatch.setattr(panel, "mapToGlobal", lambda _: desktop_origin)
+    try:
+        panel.show_details()
+        assert panel.popup.x() == desktop_origin.x()
+        assert panel.popup.y() == max(
+            area.top(), desktop_origin.y() - panel.popup.height() - 8
+        )
+    finally:
+        panel.popup.close()
+        panel.close()
+
+
 def test_settings_apply_zero_offset_and_interval_to_running_poller(qapp, tmp_path, monkeypatch):
     from PySide6.QtCore import QMetaObject, Qt
     from PySide6.QtWidgets import QDialog
