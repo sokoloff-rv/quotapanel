@@ -201,6 +201,15 @@ class TaskbarPanel(QWidget):
         if self.isVisible() and not self._order_timer.isActive():
             self._order_timer.start(0)
 
+    def shutdown(self) -> None:
+        self._dock_timer.stop()
+        self._countdown_timer.stop()
+        self._order_timer.stop()
+        if self._order_watcher is not None:
+            self._order_watcher.stop()
+        if self._native_dock is not None:
+            self._native_dock.detach()
+
     def _restore_window_order(self) -> None:
         if self.isVisible() and self._show_requested:
             from quotabubble.platform.taskbar import keep_above_taskbar

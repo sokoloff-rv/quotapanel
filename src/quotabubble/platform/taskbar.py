@@ -241,6 +241,14 @@ def _window_band(hwnd: int) -> int | None:
     return band.value if _band_query(hwnd, ctypes.byref(band)) else None
 
 
+def _dispose_foreign(window) -> None:
+    from shiboken6 import delete
+
+    # Delete only Qt's representation, which does not own Explorer's HWND.
+    # It must leave Qt's window registry before QApplication tries to quit.
+    delete(window)
+
+
 class TaskbarDock:
     """Embed only our HWND, so it follows Explorer's taskbar window band.
 
@@ -294,7 +302,7 @@ class TaskbarDock:
             window = self._widget.windowHandle()
             if window is not None:
                 window.setParent(None)
-            self._foreign.deleteLater()
+            _dispose_foreign(self._foreign)
             self._foreign, self._tray = None, None
 
 

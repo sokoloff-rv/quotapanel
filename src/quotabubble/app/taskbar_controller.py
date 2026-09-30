@@ -21,3 +21,15 @@ class PanelSettingsController:
         self.panel.apply_settings()
         if self.polling is not None:
             self.polling.set_interval(self.settings.refresh_interval_ms)
+
+
+class PanelShutdownController:
+    """Release the foreign taskbar wrapper before Qt checks open windows."""
+
+    def __init__(self, panel: TaskbarPanel, application) -> None:
+        self.panel = panel
+        self.application = application
+
+    def quit(self) -> None:
+        self.panel.shutdown()
+        self.application.quit()
