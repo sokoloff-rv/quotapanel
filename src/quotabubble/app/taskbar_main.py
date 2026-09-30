@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QAction, QGuiApplication
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from quotabubble.app.cache import load_snapshots, save_snapshots
 from quotabubble.app.instance import SingleInstance
@@ -25,6 +25,7 @@ from quotabubble.providers.base import ProviderStatus, UsageSnapshot, UsageWindo
 from quotabubble.providers.claude import ClaudeProvider
 from quotabubble.providers.codex import CodexProvider
 from quotabubble.ui.icon import app_icon
+from quotabubble.ui.taskbar_menu import TaskbarMenu
 from quotabubble.ui.taskbar_panel import PanelSettingsDialog, TaskbarPanel
 
 
@@ -145,7 +146,7 @@ def main() -> None:
     app.aboutToQuit.connect(instance.close)
     tray = QSystemTrayIcon(app_icon())
     tray.setToolTip("QuotaPanel · Codex и Claude" + (" · пример" if demo else ""))
-    menu = QMenu()
+    menu = TaskbarMenu()
     menu.addAction("Показать квоты", panel.show_details)
     menu.addAction("Показать / скрыть панель", panel.toggle_visible)
     controller = PanelSettingsController(panel, settings)

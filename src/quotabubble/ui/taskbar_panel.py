@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QLabel,
-    QMenu,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -34,6 +33,7 @@ from quotabubble.app.taskbar_model import (
 from quotabubble.app.taskbar_settings import PanelSettings
 from quotabubble.presentation.formatting import format_age, format_reset
 from quotabubble.providers.base import ProviderStatus, UsageSnapshot
+from quotabubble.ui.taskbar_menu import TaskbarMenu
 
 COLORS = {"ok": "#64d5ba", "warning": "#efc164", "critical": "#ff7d88", "muted": "#a4adba"}
 logger = logging.getLogger(__name__)
@@ -337,7 +337,10 @@ class TaskbarPanel(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        # Alpha-zero pixels on Windows layered windows pass clicks through.
+        # A single alpha step is visually transparent but keeps the entire
+        # rectangular panel clickable, including whitespace and its corners.
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         if not self._transparent:
             background = QColor("#f4f5f8" if self._light else "#20232b")
@@ -418,7 +421,7 @@ class TaskbarPanel(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.show_details()
         elif event.button() == Qt.MouseButton.RightButton:
-            menu = QMenu(self)
+            menu = TaskbarMenu(self)
             menu.addAction("Обновить", self.refresh_requested.emit)
             menu.addAction("Настройки", self.settings_requested.emit)
             menu.exec(event.globalPosition().toPoint())

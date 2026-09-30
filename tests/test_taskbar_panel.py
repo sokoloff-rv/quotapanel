@@ -261,7 +261,13 @@ def test_theme_and_transparency_render_independently(
         background = image.pixelColor(round(4 * scale), round(20 * scale))
         assert panel._light is expected_light
         if transparent:
-            assert background.alpha() == 0
+            assert background.alpha() == 1
+            # Windows uses alpha for native hit testing. All blank pixels,
+            # including the corners, must retain a nonzero alpha value.
+            assert all(
+                image.pixelColor(x, y).alpha() >= 1
+                for x in range(image.width()) for y in range(image.height())
+            )
         else:
             assert background.alpha() > 200
             assert (background.red() > 200) is expected_light
