@@ -18,13 +18,14 @@ from quotabubble.app.logging_setup import setup_logging
 from quotabubble.app.polling import PollingService
 from quotabubble.app.runtime import PollingRuntime
 from quotabubble.app.state import AppState
+from quotabubble.app.taskbar_controller import PanelSettingsController
 from quotabubble.app.taskbar_model import PROVIDER_NAMES
 from quotabubble.app.taskbar_settings import CACHE_PATH, CONFIG_DIR, PanelSettings
 from quotabubble.providers.base import ProviderStatus, UsageSnapshot, UsageWindow
 from quotabubble.providers.claude import ClaudeProvider
 from quotabubble.providers.codex import CodexProvider
 from quotabubble.ui.icon import app_icon
-from quotabubble.ui.taskbar_panel import TaskbarPanel, edit_placement
+from quotabubble.ui.taskbar_panel import PanelSettingsDialog, TaskbarPanel
 
 
 def demo_snapshots() -> list[UsageSnapshot]:
@@ -129,6 +130,10 @@ def main() -> None:
         panel.popup.show()
         app.processEvents()
         panel.popup.grab().save(str(args.render_preview / "details.png"))
+        dialog = PanelSettingsDialog(settings)
+        dialog.show()
+        app.processEvents()
+        dialog.grab().save(str(args.render_preview / "settings.png"))
         return
     instance = SingleInstance(panel.show_details, name="quotapanel-demo" if demo else "quotapanel")
     if not instance.acquire():
@@ -139,13 +144,9 @@ def main() -> None:
     menu = QMenu()
     menu.addAction("Показать квоты", panel.show_details)
     menu.addAction("Показать / скрыть панель", panel.toggle_visible)
-    def placement() -> None:
-        panel.popup.hide()
-        if edit_placement(settings):
-            panel.sync_placement()
-
-    panel.settings_requested.connect(placement)
-    menu.addAction("Расположение…", placement)
+    controller = PanelSettingsController(panel, settings)
+    panel.settings_requested.connect(controller.configure)
+    menu.addAction("Настройки…", controller.configure)
     autostart = QAction("Запускать вместе с Windows", menu)
     autostart.setCheckable(True)
     autostart.setChecked(settings.autostart)
@@ -175,7 +176,8 @@ def main() -> None:
             last_good=load_snapshots(CACHE_PATH),
             save_last_good=lambda data: save_snapshots(data, CACHE_PATH),
         )
-        service = PollingService(providers, runtime=runtime)
+        service = PollingService(providers, settings.refresh_interval_ms, runtime=runtime)
+        controller.polling = service
         service.snapshot_ready.connect(panel.apply_snapshot)
         panel.refresh_requested.connect(lambda: service.poll(force=True))
         menu.addAction("Обновить сейчас", lambda: service.poll(force=True))

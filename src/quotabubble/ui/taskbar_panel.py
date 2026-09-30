@@ -61,27 +61,32 @@ class DetailsPopup(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(18, 14, 18, 14)
         self._layout.setSpacing(9)
+        self._labels: list[QLabel] = []
+        refresh = QPushButton("Обновить квоты")
+        refresh.clicked.connect(self.refresh_requested.emit)
+        self._layout.addWidget(refresh)
+        setup = QPushButton("Настройки")
+        setup.clicked.connect(self.settings_requested.emit)
+        self._layout.addWidget(setup)
 
     def rebuild(self, note: str = "") -> None:
-        while self._layout.count():
-            item = self._layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        heading = QLabel("Квоты · осталось" if self._settings.remaining else "Квоты · использовано")
-        heading.setStyleSheet("font-size: 13pt; font-weight: 600;")
-        self._layout.addWidget(heading)
+        rows = [
+            (
+                "Квоты · осталось" if self._settings.remaining else "Квоты · использовано",
+                "font-size: 13pt; font-weight: 600;",
+                False,
+            )
+        ]
         for snapshot in self._state.ordered():
             name = PROVIDER_NAMES[snapshot.provider]
             if snapshot.plan:
                 name += f" · {snapshot.plan}"
-            title = QLabel(name)
-            title.setStyleSheet("font-weight: 600; margin-top: 6px;")
-            self._layout.addWidget(title)
+            rows.append((name, "font-weight: 600; margin-top: 6px;", False))
             if snapshot.status is not ProviderStatus.OK:
                 message = STATUS_TEXT.get(snapshot.status, "Нет данных")
                 if snapshot.status in {ProviderStatus.NO_CREDENTIALS, ProviderStatus.EXPIRED}:
                     message += " в Codex" if snapshot.provider == "codex" else " в Claude Code"
-                self._layout.addWidget(QLabel(message))
+                rows.append((message, "", True))
             for window in snapshot.windows:
                 label = {"session": "5 часов", "weekly": "Неделя"}.get(window.key, window.label)
                 if window.scope:
@@ -91,11 +96,9 @@ class DetailsPopup(QWidget):
                     f"{label}: {max(0, min(100, round(value)))}%"
                     f" · сброс через {_reset(window.resets_at)}"
                 )
-                line = QLabel(text)
-                line.setWordWrap(True)
-                self._layout.addWidget(line)
+                rows.append((text, "", True))
             if snapshot.stale:
-                self._layout.addWidget(QLabel("Сохранённые данные · обновить сейчас"))
+                rows.append(("Сохранённые данные · обновить сейчас", "", False))
             elif snapshot.fetched_at:
                 age = format_age(snapshot.fetched_at).replace("just now", "только что")
                 age = (
@@ -103,19 +106,34 @@ class DetailsPopup(QWidget):
                     .replace("h ago", "ч назад")
                     .replace("m ago", "м назад")
                 )
-                self._layout.addWidget(QLabel(f"Обновлено: {age}"))
+                rows.append((f"Обновлено: {age}", "", False))
         if note:
-            label = QLabel(note)
-            label.setWordWrap(True)
-            label.setStyleSheet("color: #efc164;")
-            self._layout.addWidget(label)
-        refresh = QPushButton("Обновить квоты")
-        refresh.clicked.connect(self.refresh_requested.emit)
-        self._layout.addWidget(refresh)
-        setup = QPushButton("Расположение и настройки")
-        setup.clicked.connect(self.settings_requested.emit)
-        self._layout.addWidget(setup)
-        self.adjustSize()
+            rows.append((note, "color: #efc164;", True))
+        for index, (text, style, wrap) in enumerate(rows):
+            if index == len(self._labels):
+                label = QLabel(self)
+                self._labels.append(label)
+                self._layout.insertWidget(index, label)
+            label = self._labels[index]
+            label.setText(text)
+            if label.styleSheet() != style:
+                label.setStyleSheet(style)
+            label.setWordWrap(wrap)
+            label.show()
+            label.ensurePolished()
+        for label in self._labels[len(rows):]:
+            label.hide()
+        # Resolve fonts and wrapping before the first show. Reuse widgets on
+        # countdown ticks so deferred deletes cannot disturb the layout.
+        self.ensurePolished()
+        self._layout.invalidate()
+        height = (
+            self._layout.totalHeightForWidth(self.width())
+            if self._layout.hasHeightForWidth()
+            else self._layout.sizeHint().height()
+        )
+        self.setFixedHeight(height)
+        self._layout.activate()
 
 
 class TaskbarPanel(QWidget):
@@ -361,36 +379,49 @@ class TaskbarPanel(QWidget):
         self.setToolTip("\n".join(lines))
 
 
-def edit_placement(settings: PanelSettings, parent: QWidget | None = None) -> bool:
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("Расположение квот")
-    layout = QVBoxLayout(dialog)
-    note = QLabel(
-        "Разместите панель в свободном месте слева. "
-        "Она не резервирует место для кнопок Windows; "
-        "если они приближаются, уменьшите ширину."
-    )
-    note.setWordWrap(True)
-    layout.addWidget(note)
-    form = QFormLayout()
-    width = QSpinBox()
-    width.setRange(220, 420)
-    width.setValue(settings.width)
-    offset = QSpinBox()
-    offset.setRange(8, 4000)
-    offset.setValue(settings.offset)
-    form.addRow("Ширина", width)
-    form.addRow("Отступ слева", offset)
-    layout.addLayout(form)
-    buttons = QDialogButtonBox(
-        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-    )
-    buttons.accepted.connect(dialog.accept)
-    buttons.rejected.connect(dialog.reject)
-    layout.addWidget(buttons)
-    dialog.resize(390, 220)
+class PanelSettingsDialog(QDialog):
+    def __init__(self, settings: PanelSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Настройки QuotaPanel")
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Панель не резервирует место для кнопок Windows. "
+            "Если они приближаются, уменьшите ширину."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        self.width_input = QSpinBox()
+        self.width_input.setRange(220, 420)
+        self.width_input.setValue(settings.width)
+        self.offset_input = QSpinBox()
+        self.offset_input.setRange(0, 4000)
+        self.offset_input.setValue(settings.offset)
+        self.interval_input = QSpinBox()
+        self.interval_input.setRange(1, 60)
+        self.interval_input.setValue(settings.refresh_interval_minutes)
+        self.interval_input.setSuffix(" мин")
+        form.addRow("Ширина", self.width_input)
+        form.addRow("Отступ слева", self.offset_input)
+        form.addRow("Обновлять квоты каждые", self.interval_input)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(390, 230)
+
+    def apply(self, settings: PanelSettings) -> None:
+        settings.width = self.width_input.value()
+        settings.offset = self.offset_input.value()
+        settings.refresh_interval_minutes = self.interval_input.value()
+
+
+def edit_settings(settings: PanelSettings, parent: QWidget | None = None) -> bool:
+    dialog = PanelSettingsDialog(settings, parent)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return False
-    settings.width, settings.offset = width.value(), offset.value()
-    settings.save()
+    dialog.apply(settings)
     return True

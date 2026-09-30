@@ -15,10 +15,15 @@ CACHE_PATH = CONFIG_DIR / "last_good.json"
 
 class PanelSettings(BaseModel):
     width: int = Field(default=280, ge=220, le=420)
-    offset: int = Field(default=12, ge=8, le=4000)
+    offset: int = Field(default=12, ge=0, le=4000)
+    refresh_interval_minutes: int = Field(default=5, ge=1, le=60)
     remaining: bool = True
     autostart: bool = False
     hidden: bool = False
+
+    @property
+    def refresh_interval_ms(self) -> int:
+        return self.refresh_interval_minutes * 60_000
 
     @classmethod
     def load(cls, path: Path = SETTINGS_PATH) -> PanelSettings:
