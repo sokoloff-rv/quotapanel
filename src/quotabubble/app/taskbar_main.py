@@ -18,7 +18,7 @@ from quotabubble.app.logging_setup import setup_logging
 from quotabubble.app.polling import PollingService
 from quotabubble.app.runtime import PollingRuntime
 from quotabubble.app.state import AppState
-from quotabubble.app.taskbar_controller import PanelSettingsController
+from quotabubble.app.taskbar_controller import PanelSettingsController, PanelShutdownController
 from quotabubble.app.taskbar_model import PROVIDER_NAMES
 from quotabubble.app.taskbar_settings import CACHE_PATH, CONFIG_DIR, PanelSettings
 from quotabubble.providers.base import ProviderStatus, UsageSnapshot, UsageWindow
@@ -118,6 +118,8 @@ def main() -> None:
             )
     state.replace(snapshots)
     panel = TaskbarPanel(state, settings, preview=preview)
+    shutdown = PanelShutdownController(panel, app)
+    app.aboutToQuit.connect(panel.shutdown)
     if preview:
         args.render_preview.mkdir(parents=True, exist_ok=True)
         panel.show()
@@ -191,7 +193,7 @@ def main() -> None:
     else:
         menu.addAction("Режим примера · данные вымышлены").setEnabled(False)
     menu.addSeparator()
-    menu.addAction("Выход", app.quit)
+    menu.addAction("Выход", shutdown.quit)
     tray.setContextMenu(menu)
     tray.activated.connect(
         lambda reason: (
@@ -203,7 +205,7 @@ def main() -> None:
     if panel.note and not panel.isVisible():
         tray.showMessage("QuotaPanel", panel.note, QSystemTrayIcon.MessageIcon.Information)
     if args.quit_after:
-        QTimer.singleShot(args.quit_after * 1000, app.quit)
+        QTimer.singleShot(args.quit_after * 1000, shutdown.quit)
     sys.exit(app.exec())
 
 

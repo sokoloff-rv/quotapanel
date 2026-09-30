@@ -4,7 +4,7 @@ import logging
 import sys
 from datetime import datetime
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QApplication,
@@ -156,6 +156,7 @@ class TaskbarPanel(QWidget):
         self._note = ""
         self._show_requested = not settings.hidden
         self._placement_misses = 0
+        self._native_dock = None
         self.setWindowTitle("QuotaPanel")
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -171,9 +172,12 @@ class TaskbarPanel(QWidget):
         self.popup.refresh_requested.connect(self.refresh_requested.emit)
         self.popup.settings_requested.connect(self.settings_requested.emit)
         if sys.platform == "win32" and not preview:
+            from quotabubble.platform.taskbar import TaskbarDock
             from quotabubble.platform.windows import configure_window
 
             configure_window(self)
+            self._native_dock = TaskbarDock(self)
+            QApplication.instance().aboutToQuit.connect(self._native_dock.detach)
         self._dock_timer = QTimer(self)
         self._dock_timer.setInterval(1000)
         self._dock_timer.timeout.connect(self.sync_placement)
@@ -196,6 +200,15 @@ class TaskbarPanel(QWidget):
     def _schedule_window_order(self) -> None:
         if self.isVisible() and not self._order_timer.isActive():
             self._order_timer.start(0)
+
+    def shutdown(self) -> None:
+        self._dock_timer.stop()
+        self._countdown_timer.stop()
+        self._order_timer.stop()
+        if self._order_watcher is not None:
+            self._order_watcher.stop()
+        if self._native_dock is not None:
+            self._native_dock.detach()
 
     def _restore_window_order(self) -> None:
         if self.isVisible() and self._show_requested:
@@ -296,6 +309,8 @@ class TaskbarPanel(QWidget):
             self._note = note
             self.placement_changed.emit(note)
         if target and self._show_requested:
+            if self._native_dock and self._native_dock.prepare(embedded=not info.autohide):
+                target = Rect(target.x - bar.x, target.y - bar.y, target.width, target.height)
             geometry = QRectF(target.x, target.y, target.width, target.height).toRect()
             if self.geometry() != geometry:
                 self.setGeometry(geometry)
@@ -325,10 +340,14 @@ class TaskbarPanel(QWidget):
         self.popup.rebuild(self._note)
         screen = self.screen()
         available = screen.availableGeometry()
-        x = max(available.left(), min(self.x(), available.right() - self.popup.width() + 1))
+        # Embedded geometry is relative to the taskbar; popups are independent
+        # top-level windows and need the panel's actual desktop coordinates.
+        origin = self.mapToGlobal(QPoint(0, 0))
+        x = max(available.left(), min(origin.x(), available.right() - self.popup.width() + 1))
         y = max(
             available.top(),
-            min(self.y() - self.popup.height() - 8, available.bottom() - self.popup.height() + 1),
+            min(origin.y() - self.popup.height() - 8,
+                available.bottom() - self.popup.height() + 1),
         )
         self.popup.move(x, y)
         self.popup.show()

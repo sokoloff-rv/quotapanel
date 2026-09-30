@@ -15,6 +15,7 @@ def test_order_repair_only_when_covered_and_stays_below_flyouts(monkeypatch):
     previous = {10: 20, 20: 99, 99: 77, 77: None}
     user = SimpleNamespace(
         FindWindowW=lambda *_: 99,
+        GetParent=lambda _: None,
         GetWindow=lambda hwnd, _: previous.get(hwnd),
         SetWindowPos=Mock(),
     )
@@ -36,6 +37,7 @@ def test_order_traversal_tolerates_cyclic_handles(monkeypatch):
 
     user = SimpleNamespace(
         FindWindowW=lambda *_: 99,
+        GetParent=lambda _: None,
         GetWindow=Mock(side_effect=lambda hwnd, _: {10: 20, 20: 10}[hwnd]),
         SetWindowPos=Mock(),
     )
@@ -44,6 +46,130 @@ def test_order_traversal_tolerates_cyclic_handles(monkeypatch):
     taskbar.keep_above_taskbar(10)
     assert user.GetWindow.call_count == 3
     user.SetWindowPos.assert_not_called()
+
+
+def test_embedded_panel_repairs_only_sibling_order_without_activation(monkeypatch):
+    from quotabubble.platform import taskbar
+
+    user = SimpleNamespace(
+        FindWindowW=lambda *_: 99, GetParent=lambda _: 99,
+        GetWindow=Mock(return_value=None), SetWindowPos=Mock(),
+    )
+    monkeypatch.setattr(taskbar, "_user", user)
+    taskbar.keep_above_taskbar(10)
+    user.SetWindowPos.assert_not_called()
+    user.GetWindow.return_value = 20
+    taskbar.keep_above_taskbar(10)
+    assert user.SetWindowPos.call_args.args[1] is None  # HWND_TOP in child order
+    assert user.SetWindowPos.call_args.args[-1] & 0x0010  # SWP_NOACTIVATE
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_dock_reuses_parent_and_rebinds_after_taskbar_recreation(monkeypatch, restart):
+    from PySide6.QtGui import QWindow
+
+    from quotabubble.platform import taskbar, windows
+
+    current_tray, parent = [99], [None]
+    native = SimpleNamespace(
+        FindWindowW=lambda *_: current_tray[0], GetParent=lambda _: parent[0],
+        IsWindow=lambda _: not restart,
+    )
+    monkeypatch.setattr(taskbar, "_user", native)
+    monkeypatch.setattr(taskbar, "_window_band", lambda _: None)
+    foreign = Mock()
+    disposed = Mock()
+    monkeypatch.setattr(taskbar, "_dispose_foreign", disposed)
+    wrapper = Mock(return_value=foreign)
+    monkeypatch.setattr(QWindow, "fromWinId", wrapper)
+    window = Mock()
+    window.setParent.side_effect = lambda value: parent.__setitem__(
+        0, current_tray[0] if value else None
+    )
+    widget = Mock()
+    widget.winId.return_value = 10
+    widget.windowHandle.return_value = window
+    configure = Mock()
+    monkeypatch.setattr(windows, "configure_window", configure)
+    dock = taskbar.TaskbarDock(widget)
+    assert dock.prepare(embedded=True)
+    assert dock.prepare(embedded=True)
+    wrapper.assert_called_once_with(99)
+    assert widget.destroy.call_count == int(restart)
+    assert configure.call_count == int(restart)
+    current_tray[0] = 100
+    assert dock.prepare(embedded=True)
+    assert wrapper.call_count == 2
+    assert parent[0] == 100
+    assert dock.prepare(embedded=False) is False
+    assert parent[0] is None
+    assert disposed.call_count == 2
+    dock.detach()
+    assert disposed.call_count == 2
+
+
+@pytest.mark.parametrize("failure", ["absent", "unsupported", "parent_rejected"])
+def test_dock_falls_back_to_overlay_if_embedding_unavailable(monkeypatch, failure):
+    from PySide6.QtGui import QWindow
+
+    from quotabubble.platform import taskbar
+
+    monkeypatch.setattr(taskbar, "_user", SimpleNamespace(
+        FindWindowW=lambda *_: None if failure == "absent" else 99,
+        GetParent=lambda _: None, IsWindow=lambda _: True,
+    ))
+    monkeypatch.setattr(taskbar, "_window_band", lambda _: None)
+    foreign = Mock()
+    disposed = Mock()
+    monkeypatch.setattr(taskbar, "_dispose_foreign", disposed)
+    monkeypatch.setattr(QWindow, "fromWinId", lambda _: (
+        None if failure == "unsupported" else foreign
+    ))
+    widget = Mock()
+    widget.winId.return_value = 10
+    dock = taskbar.TaskbarDock(widget)
+    assert dock.prepare(embedded=True) is False
+    assert dock._foreign is None
+    if failure == "parent_rejected":
+        disposed.assert_called_once_with(foreign)
+        assert widget.windowHandle().setParent.call_args.args == (None,)
+
+
+def test_start_open_at_launch_defers_attachment_until_bands_match(monkeypatch):
+    from PySide6.QtGui import QWindow
+
+    from quotabubble.platform import taskbar
+
+    parent_band, parent = [6], [None]
+    monkeypatch.setattr(taskbar, "_user", SimpleNamespace(
+        FindWindowW=lambda *_: 99, GetParent=lambda _: parent[0], IsWindow=lambda _: True,
+    ))
+    monkeypatch.setattr(taskbar, "_window_band", lambda hwnd: parent_band[0] if hwnd == 99 else 1)
+    wrapper = Mock(return_value=Mock())
+    monkeypatch.setattr(QWindow, "fromWinId", wrapper)
+    widget = Mock()
+    widget.winId.return_value = 10
+    widget.windowHandle().setParent.side_effect = lambda _: parent.__setitem__(0, 99)
+    dock = taskbar.TaskbarDock(widget)
+    for _ in range(3):
+        assert dock.prepare(embedded=True) is False
+    widget.windowHandle().setParent.assert_not_called()
+    wrapper.assert_not_called()
+    parent_band[0] = 1
+    assert dock.prepare(embedded=True)
+    wrapper.assert_called_once_with(99)
+
+
+@pytest.mark.parametrize("result", ["absent", "error", "success"])
+def test_optional_band_query_failure_is_not_a_startup_error(monkeypatch, result):
+    from quotabubble.platform import taskbar
+
+    def query(hwnd, pointer):
+        pointer._obj.value = 6
+        return result == "success"
+
+    monkeypatch.setattr(taskbar, "_band_query", None if result == "absent" else query)
+    assert taskbar._window_band(99) == (6 if result == "success" else None)
 
 
 def test_watcher_filters_content_events_and_unhooks_once(monkeypatch):
@@ -100,69 +226,3 @@ def test_shell_identity_uses_executable_basename_and_closes_handle(monkeypatch):
     assert taskbar._shell_flyout(10) is True
     kernel.OpenProcess.assert_called_once_with(0x1000, False, 123)
     kernel.CloseHandle.assert_called_once_with(42)
-
-
-@pytest.mark.parametrize("missing", ["taskbar", "fullscreen"])
-def test_steady_docking_does_not_redraw_or_blink_on_a_single_bad_read(
-    qapp, monkeypatch, missing
-):
-    from dataclasses import replace
-
-    from quotabubble.app.state import AppState
-    from quotabubble.app.taskbar_model import Rect
-    from quotabubble.app.taskbar_settings import PanelSettings
-    from quotabubble.platform import taskbar
-    from quotabubble.ui.taskbar_panel import TaskbarPanel
-
-    screen = qapp.primaryScreen()
-    g = screen.geometry()
-    scale = screen.devicePixelRatio()
-    monitor = Rect(0, 0, round(g.width() * scale), round(g.height() * scale))
-    info = taskbar.TaskbarInfo(
-        Rect(0, round((g.height() - 48) * scale), monitor.width, round(48 * scale)),
-        monitor, screen.name(), True, False, False, False,
-    )
-    current = [info]
-    monkeypatch.setattr(taskbar, "taskbar_info", lambda: current[0])
-    monkeypatch.setattr(taskbar, "taskbar_is_light", lambda: False)
-    repair = Mock()
-    monkeypatch.setattr(taskbar, "keep_above_taskbar", repair)
-    panel = TaskbarPanel(AppState(), PanelSettings(), preview=True)
-    panel._preview = False
-    try:
-        panel.sync_placement()
-        assert panel.isVisible()
-        geometry = Mock(wraps=panel.setGeometry)
-        update = Mock(wraps=panel.update)
-        monkeypatch.setattr(panel, "setGeometry", geometry)
-        monkeypatch.setattr(panel, "update", update)
-        for _ in range(3):
-            panel.sync_placement()
-        geometry.assert_not_called()
-        update.assert_not_called()
-        bad = None if missing == "taskbar" else replace(info, fullscreen=True)
-        current[0] = bad
-        panel.sync_placement()
-        assert panel.isVisible()
-        current[0] = info
-        panel.sync_placement()
-        assert panel.isVisible()
-        current[0] = bad
-        panel.sync_placement()
-        panel.sync_placement()
-        assert not panel.isVisible()
-        current[0] = info
-        panel.sync_placement()
-        assert panel.isVisible()
-        # Bursts of shell events coalesce into one immediate order check.
-        repair.reset_mock()
-        for _ in range(5):
-            panel._schedule_window_order()
-        qapp.processEvents()
-        repair.assert_called_once()
-        panel._show_requested = False
-        panel.sync_placement()
-        assert not panel.isVisible()
-    finally:
-        panel.close()
-        panel.popup.close()

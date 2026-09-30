@@ -147,6 +147,57 @@ def test_popup_geometry_is_stable_on_first_show_and_countdown_ticks(qapp) -> Non
         panel.close()
 
 
+def test_details_use_desktop_coordinates_when_panel_geometry_is_parent_relative(qapp, monkeypatch):
+    from PySide6.QtCore import QPoint
+
+    from quotabubble.app.state import AppState
+    from quotabubble.app.taskbar_main import demo_snapshots
+    from quotabubble.app.taskbar_settings import PanelSettings
+    from quotabubble.ui.taskbar_panel import TaskbarPanel
+
+    state = AppState()
+    state.replace(demo_snapshots())
+    panel = TaskbarPanel(state, PanelSettings(), preview=True)
+    area = panel.screen().availableGeometry()
+    desktop_origin = QPoint(area.left() + 10, area.bottom() - 44)
+    panel.setGeometry(10, 2, 280, 44)
+    monkeypatch.setattr(panel, "mapToGlobal", lambda _: desktop_origin)
+    try:
+        panel.show_details()
+        assert panel.popup.x() == desktop_origin.x()
+        assert panel.popup.y() == max(
+            area.top(), desktop_origin.y() - panel.popup.height() - 8
+        )
+    finally:
+        panel.popup.close()
+        panel.close()
+
+
+def test_quit_stops_docking_and_releases_foreign_wrapper_before_application_exit(qapp):
+    from unittest.mock import Mock
+
+    from quotabubble.app.state import AppState
+    from quotabubble.app.taskbar_controller import PanelShutdownController
+    from quotabubble.app.taskbar_settings import PanelSettings
+    from quotabubble.ui.taskbar_panel import TaskbarPanel
+
+    panel = TaskbarPanel(AppState(), PanelSettings(), preview=True)
+    order = []
+    panel._native_dock = Mock()
+    panel._native_dock.detach.side_effect = lambda: order.append("detach")
+    panel._order_watcher = Mock()
+    application = Mock()
+    application.quit.side_effect = lambda: order.append("quit")
+    panel._dock_timer.start()
+    try:
+        PanelShutdownController(panel, application).quit()
+        assert order == ["detach", "quit"]
+        assert not panel._dock_timer.isActive()
+        panel._order_watcher.stop.assert_called_once()
+    finally:
+        panel.close()
+
+
 def test_settings_apply_zero_offset_and_interval_to_running_poller(qapp, tmp_path, monkeypatch):
     from PySide6.QtCore import QMetaObject, Qt
     from PySide6.QtWidgets import QDialog
@@ -271,16 +322,20 @@ def test_theme_and_transparency_render_independently(
         else:
             assert background.alpha() > 200
             assert (background.red() > 200) is expected_light
-        # Even with no background, fully opaque provider-name glyphs remain
-        # readable and use the foreground selected by the theme.
+        # Font rasterizers need not produce any alpha-255 glyph pixels.
+        # Look for sufficiently visible text in the expected foreground color,
+        # excluding the background rather than requiring full opacity.
+        foreground = (37, 43, 53) if expected_light else (237, 241, 247)
         ink = [
             image.pixelColor(x, y)
             for x in range(round(10 * scale), round(50 * scale))
             for y in range(round(4 * scale), round(22 * scale))
-            if image.pixelColor(x, y).alpha() == 255
+            if image.pixelColor(x, y).alpha() > 100
+            and max(abs(component - expected) for component, expected in zip(
+                image.pixelColor(x, y).getRgb()[:3], foreground, strict=True
+            )) < 40
         ]
         assert ink
-        assert any((color.red() < 80) is expected_light for color in ink)
     finally:
         panel.close()
         panel.popup.close()

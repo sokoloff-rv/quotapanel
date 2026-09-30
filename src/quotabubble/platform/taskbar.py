@@ -1,4 +1,4 @@
-"""Read taskbar geometry; do not inject code into or reparent to Explorer."""
+"""Read taskbar geometry and dock our own window without injecting into Explorer."""
 
 from __future__ import annotations
 
@@ -49,6 +49,14 @@ _user.SetWindowPos.argtypes = [
 _user.SetWindowPos.restype = wintypes.BOOL
 _user.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
 _user.GetWindow.restype = wintypes.HWND
+_user.GetParent.argtypes = [wintypes.HWND]
+_user.GetParent.restype = wintypes.HWND
+_user.IsWindow.argtypes = [wintypes.HWND]
+_user.IsWindow.restype = wintypes.BOOL
+_band_query = getattr(_user, "GetWindowBand", None)
+if _band_query is not None:
+    _band_query.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    _band_query.restype = wintypes.BOOL
 _get_window_long = (
     _user.GetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else _user.GetWindowLongW
 )
@@ -186,9 +194,15 @@ def taskbar_info() -> TaskbarInfo | None:
 
 
 def keep_above_taskbar(hwnd: int) -> None:
+    tray = _user.FindWindowW("Shell_TrayWnd", None)
+    if tray and _user.GetParent(hwnd) == tray:
+        # Child windows follow the taskbar when Start promotes it to a shell
+        # band. Only repair sibling order, never make the child top-level.
+        if _user.GetWindow(hwnd, 3):
+            _user.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        return
     if not _needs_raise(hwnd):
         return
-    tray = _user.FindWindowW("Shell_TrayWnd", None)
     if not tray:
         return
     # Insert just above the taskbar, preserving flyouts/popups above it.
@@ -216,6 +230,80 @@ def _needs_raise(hwnd: int) -> bool:
         seen.add(previous)
         previous = _user.GetWindow(previous, 3)
     return False
+
+
+def _window_band(hwnd: int) -> int | None:
+    # Optional read-only Windows export. No SetWindowBand or elevated rights:
+    # if unavailable, try ordinary Qt embedding and verify the native parent.
+    if _band_query is None:
+        return None
+    band = wintypes.DWORD()
+    return band.value if _band_query(hwnd, ctypes.byref(band)) else None
+
+
+def _dispose_foreign(window) -> None:
+    from shiboken6 import delete
+
+    # Delete only Qt's representation, which does not own Explorer's HWND.
+    # It must leave Qt's window registry before QApplication tries to quit.
+    delete(window)
+
+
+class TaskbarDock:
+    """Embed only our HWND, so it follows Explorer's taskbar window band.
+
+    Qt's foreign-window wrapper is used only as a parent. We neither alter
+    Explorer's styles/geometry nor load code into its process. Auto-hide uses
+    the standalone overlay because children are clipped to their parent.
+    """
+
+    def __init__(self, widget) -> None:
+        self._widget = widget
+        self._foreign = None
+        self._tray = None
+
+    def prepare(self, *, embedded: bool) -> bool:
+        from PySide6.QtGui import QWindow
+
+        tray = _user.FindWindowW("Shell_TrayWnd", None) if embedded else None
+        hwnd = int(self._widget.winId())
+        if self._foreign and tray == self._tray and _user.GetParent(hwnd) == tray:
+            return True
+        self.detach()
+        if not tray:
+            return False
+        # Explorer can destroy its children during a restart. Recreate our
+        # native surface while retaining the widget, state, signals and timers.
+        if not _user.IsWindow(hwnd):
+            self._widget.destroy()
+            self._widget.winId()
+            from quotabubble.platform.windows import configure_window
+
+            configure_window(self._widget)
+            hwnd = int(self._widget.winId())
+        child_band, parent_band = _window_band(hwnd), _window_band(tray)
+        if child_band is not None and parent_band is not None and child_band != parent_band:
+            # Start may already be open when the app launches. Cross-band
+            # SetParent is rejected; keep the overlay intact and retry on the
+            # next docking tick once the taskbar returns to its ordinary band.
+            return False
+        foreign = QWindow.fromWinId(tray)
+        if foreign is None:
+            return False
+        self._foreign, self._tray = foreign, tray
+        self._widget.windowHandle().setParent(foreign)
+        if _user.GetParent(int(self._widget.winId())) != tray:
+            self.detach()
+            return False
+        return True
+
+    def detach(self) -> None:
+        if self._foreign is not None:
+            window = self._widget.windowHandle()
+            if window is not None:
+                window.setParent(None)
+            _dispose_foreign(self._foreign)
+            self._foreign, self._tray = None, None
 
 
 class TaskbarEventWatcher:
