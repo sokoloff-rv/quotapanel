@@ -23,6 +23,8 @@ Thumbs.db
 
 # Local reference clones (not part of the project)
 external/
+work/
+outputs/
 .wakatime-project
 
 # Microsoft Store package output

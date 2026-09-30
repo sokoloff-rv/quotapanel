@@ -21,11 +21,13 @@ class PollingWorker(QObject):
         providers: list[Provider],
         interval_ms: int,
         parent: QObject | None = None,
+        *,
+        runtime: PollingRuntime | None = None,
     ) -> None:
         super().__init__(parent)
         self._interval_ms = interval_ms
         self._timer: QTimer | None = None
-        self._runtime = PollingRuntime(
+        self._runtime = runtime or PollingRuntime(
             providers,
             last_good=load_snapshots(),
             save_last_good=save_snapshots,
@@ -79,10 +81,12 @@ class PollingService(QObject):
         providers: list[Provider],
         interval_ms: int = DEFAULT_REFRESH_INTERVAL_MS,
         parent: QObject | None = None,
+        *,
+        runtime: PollingRuntime | None = None,
     ) -> None:
         super().__init__(parent)
         self._thread = QThread()
-        self._worker = PollingWorker(providers, interval_ms)
+        self._worker = PollingWorker(providers, interval_ms, runtime=runtime)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.start)
         self._worker.snapshot_ready.connect(self._relay)

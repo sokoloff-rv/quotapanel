@@ -50,6 +50,7 @@ dependencies = [
 ]
 
 [project.gui-scripts]
+quota-panel = "quotabubble.app.taskbar_main:main"
 quotabubble = "quotabubble.app.main:main"
 quotabubble-settings = "quotabubble.settings_main:main"
 
