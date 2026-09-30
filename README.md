@@ -1,3 +1,16 @@
+# QuotaPanel
+
+Windows-панель с оставшимися квотами Codex и Claude в свободной левой части
+панели задач. Рядом с каждой квотой показан отсчёт до сброса. Инструкция,
+ограничения прототипа и сборка: [QUOTAPANEL.md](QUOTAPANEL.md).
+
+Этот форк основан на [QuotaBubble](https://github.com/izzet/quotabubble),
+лицензия MIT и исходное уведомление об авторских правах сохранены.
+Основная ветка форка — `master`.
+
+Ниже сохранена документация исходного приложения QuotaBubble; его команды
+установки относятся к оригинальному проекту.
+
 # QuotaBubble
 
 [![ci](https://github.com/izzet/quotabubble/actions/workflows/ci.yml/badge.svg)](https://github.com/izzet/quotabubble/actions/workflows/ci.yml)

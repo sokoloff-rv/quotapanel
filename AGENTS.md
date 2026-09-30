@@ -2,7 +2,7 @@
 
 ## Workflow
 
-- **Never commit directly to `main`.** Create a branch per item: `feat/…`, `fix/…`, `chore/…`, `docs/…`.
+- **Never commit directly to `master`.** Create a branch per item: `feat/…`, `fix/…`, `chore/…`, `docs/…`.
 - Push the branch and **open a pull request** describing the change.
 - **Wait for review.** Address review comments by pushing follow-up commits to the same branch.
 - Merge **only after explicit approval**, and **never squash-merge** — use a merge commit (default).
