@@ -18,6 +18,6 @@ class PanelSettingsController:
         if not edit_settings(self.settings):
             return
         self.settings.save()
-        self.panel.sync_placement()
+        self.panel.apply_settings()
         if self.polling is not None:
             self.polling.set_interval(self.settings.refresh_interval_ms)

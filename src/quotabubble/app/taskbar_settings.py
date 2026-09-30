@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 from platformdirs import user_config_dir
 from pydantic import BaseModel, Field
@@ -17,6 +18,8 @@ class PanelSettings(BaseModel):
     width: int = Field(default=280, ge=220, le=420)
     offset: int = Field(default=12, ge=0, le=4000)
     refresh_interval_minutes: int = Field(default=5, ge=1, le=60)
+    theme: Literal["system", "dark", "light"] = "system"
+    transparent_background: bool = False
     remaining: bool = True
     autostart: bool = False
     hidden: bool = False

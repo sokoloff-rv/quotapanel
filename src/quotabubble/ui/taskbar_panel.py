@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -32,6 +36,7 @@ from quotabubble.presentation.formatting import format_age, format_reset
 from quotabubble.providers.base import ProviderStatus, UsageSnapshot
 
 COLORS = {"ok": "#64d5ba", "warning": "#efc164", "critical": "#ff7d88", "muted": "#a4adba"}
+logger = logging.getLogger(__name__)
 
 
 def _reset(value: datetime | None) -> str:
@@ -146,9 +151,11 @@ class TaskbarPanel(QWidget):
         self._state = state
         self._settings = settings
         self._preview = preview
-        self._light = False
+        self._light = settings.theme == "light"
+        self._transparent = settings.transparent_background
         self._note = ""
         self._show_requested = not settings.hidden
+        self._placement_misses = 0
         self.setWindowTitle("QuotaPanel")
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -173,9 +180,28 @@ class TaskbarPanel(QWidget):
         self._countdown_timer = QTimer(self)
         self._countdown_timer.setInterval(15_000)
         self._countdown_timer.timeout.connect(self._tick_countdown)
+        self._order_timer = QTimer(self)
+        self._order_timer.setSingleShot(True)
+        self._order_timer.timeout.connect(self._restore_window_order)
+        self._order_watcher = None
+        if sys.platform == "win32" and not preview:
+            from quotabubble.platform.taskbar import TaskbarEventWatcher
+
+            self._order_watcher = TaskbarEventWatcher(self._schedule_window_order)
+            QApplication.instance().aboutToQuit.connect(self._order_watcher.stop)
         if not preview:
             self._dock_timer.start()
             self._countdown_timer.start()
+
+    def _schedule_window_order(self) -> None:
+        if self.isVisible() and not self._order_timer.isActive():
+            self._order_timer.start(0)
+
+    def _restore_window_order(self) -> None:
+        if self.isVisible() and self._show_requested:
+            from quotabubble.platform.taskbar import keep_above_taskbar
+
+            keep_above_taskbar(int(self.winId()))
 
     def _tick_countdown(self) -> None:
         self.update()
@@ -185,6 +211,22 @@ class TaskbarPanel(QWidget):
     @property
     def note(self) -> str:
         return self._note
+
+    def _update_appearance(self, system_light: bool) -> bool:
+        light = self._settings.theme == "light" or (
+            self._settings.theme == "system" and system_light
+        )
+        transparent = self._settings.transparent_background
+        changed = (light, transparent) != (self._light, self._transparent)
+        self._light, self._transparent = light, transparent
+        return changed
+
+    def apply_settings(self) -> None:
+        if self._preview:
+            self._update_appearance(self._light)
+        else:
+            self.sync_placement()
+        self.update()
 
     def sync_placement(self) -> None:
         if self._preview:
@@ -198,8 +240,11 @@ class TaskbarPanel(QWidget):
         info = taskbar_info()
         target = None
         note = ""
+        appearance_changed = False
         if info:
-            self._light = taskbar_is_light()
+            appearance_changed = self._update_appearance(
+                taskbar_is_light() if self._settings.theme == "system" else False
+            )
             screen = next(
                 (s for s in QGuiApplication.screens() if s.name() == info.device),
                 QGuiApplication.primaryScreen(),
@@ -239,16 +284,29 @@ class TaskbarPanel(QWidget):
                 "Панель временно скрыта: автоскрытие, полный экран "
                 "или неподдерживаемое положение панели задач."
             )
+        if target:
+            self._placement_misses = 0
+        elif self._show_requested and self.isVisible():
+            # A single transient Explorer/fullscreen observation must not
+            # make the overlay disappear and reappear on the next tick.
+            self._placement_misses += 1
+            if self._placement_misses < 2:
+                return
         if note != self._note:
             self._note = note
             self.placement_changed.emit(note)
         if target and self._show_requested:
-            self.setGeometry(target.x, target.y, target.width, target.height)
+            geometry = QRectF(target.x, target.y, target.width, target.height).toRect()
+            if self.geometry() != geometry:
+                self.setGeometry(geometry)
             if not self.isVisible():
                 self.show()
+                logger.info("panel shown")
             keep_above_taskbar(int(self.winId()))
-            self.update()
-        else:
+            if appearance_changed:
+                self.update()
+        elif self.isVisible():
+            logger.info("panel hidden: %s", note if self._show_requested else "user request")
             self.hide()
 
     def toggle_visible(self) -> None:
@@ -278,11 +336,15 @@ class TaskbarPanel(QWidget):
     def paintEvent(self, event: object) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        background = QColor("#f4f5f8" if self._light else "#20232b")
-        background.setAlpha(242)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawRoundedRect(QRectF(self.rect()), 7, 7)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if not self._transparent:
+            background = QColor("#f4f5f8" if self._light else "#20232b")
+            background.setAlpha(242)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(QRectF(self.rect()), 7, 7)
         font = QFont("Segoe UI")
         font.setPixelSize(12)
         painter.setFont(font)
@@ -401,9 +463,17 @@ class PanelSettingsDialog(QDialog):
         self.interval_input.setRange(1, 60)
         self.interval_input.setValue(settings.refresh_interval_minutes)
         self.interval_input.setSuffix(" мин")
+        self.theme_input = QComboBox()
+        for text, value in (("Как в Windows", "system"), ("Тёмная", "dark"), ("Светлая", "light")):
+            self.theme_input.addItem(text, value)
+        self.theme_input.setCurrentIndex(self.theme_input.findData(settings.theme))
+        self.transparent_input = QCheckBox("Прозрачный фон")
+        self.transparent_input.setChecked(settings.transparent_background)
         form.addRow("Ширина", self.width_input)
         form.addRow("Отступ слева", self.offset_input)
         form.addRow("Обновлять квоты каждые", self.interval_input)
+        form.addRow("Тема панели", self.theme_input)
+        form.addRow("", self.transparent_input)
         layout.addLayout(form)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -411,12 +481,14 @@ class PanelSettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        self.resize(390, 230)
+        self.resize(390, 290)
 
     def apply(self, settings: PanelSettings) -> None:
         settings.width = self.width_input.value()
         settings.offset = self.offset_input.value()
         settings.refresh_interval_minutes = self.interval_input.value()
+        settings.theme = self.theme_input.currentData()
+        settings.transparent_background = self.transparent_input.isChecked()
 
 
 def edit_settings(settings: PanelSettings, parent: QWidget | None = None) -> bool:

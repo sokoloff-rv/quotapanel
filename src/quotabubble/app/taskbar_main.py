@@ -126,6 +126,10 @@ def main() -> None:
         panel.update()
         app.processEvents()
         panel.grab().save(str(args.render_preview / "panel-light.png"))
+        panel._transparent = True
+        panel.update()
+        app.processEvents()
+        panel.grab().save(str(args.render_preview / "panel-transparent.png"))
         panel.popup.rebuild()
         panel.popup.show()
         app.processEvents()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from quotabubble.app.taskbar_model import (
     Rect,
     dock_rect,
@@ -82,6 +84,8 @@ def test_upgrade_shows_remaining_without_losing_placement(tmp_path) -> None:
     assert settings.remaining is True
     assert (settings.width, settings.offset) == (320, 20)
     assert settings.refresh_interval_minutes == 5
+    assert settings.theme == "system"
+    assert settings.transparent_background is False
 
 
 def test_panel_defaults_to_remaining() -> None:
@@ -162,6 +166,8 @@ def test_settings_apply_zero_offset_and_interval_to_running_poller(qapp, tmp_pat
     def accept(dialog):
         dialog.offset_input.setValue(0)
         dialog.interval_input.setValue(2)
+        dialog.theme_input.setCurrentIndex(dialog.theme_input.findData("light"))
+        dialog.transparent_input.setChecked(True)
         return QDialog.DialogCode.Accepted
 
     monkeypatch.setattr(PanelSettingsDialog, "exec", accept)
@@ -185,6 +191,10 @@ def test_settings_apply_zero_offset_and_interval_to_running_poller(qapp, tmp_pat
         assert restored.offset == 0
         assert restored.refresh_interval_minutes == 2
         assert restored.refresh_interval_ms == 120_000
+        assert restored.theme == "light"
+        assert restored.transparent_background is True
+        assert panel._light is True
+        assert panel._transparent is True
     finally:
         service.stop()
         panel.close()
@@ -209,6 +219,8 @@ def test_cancel_settings_does_not_change_storage_or_interval(qapp, monkeypatch):
     def cancel(dialog):
         dialog.offset_input.setValue(20)
         dialog.interval_input.setValue(1)
+        dialog.theme_input.setCurrentIndex(dialog.theme_input.findData("dark"))
+        dialog.transparent_input.setChecked(True)
         return QDialog.DialogCode.Rejected
 
     monkeypatch.setattr(PanelSettingsDialog, "exec", cancel)
@@ -221,3 +233,48 @@ def test_cancel_settings_does_not_change_storage_or_interval(qapp, monkeypatch):
     controller.polling.set_interval.assert_not_called()
     panel.close()
     panel.popup.close()
+
+
+@pytest.mark.parametrize(
+    ("theme", "system_light", "expected_light"),
+    [("system", False, False), ("system", True, True),
+     ("light", False, True), ("dark", True, False)],
+)
+@pytest.mark.parametrize("transparent", [False, True])
+def test_theme_and_transparency_render_independently(
+    qapp, theme, system_light, expected_light, transparent
+):
+    from quotabubble.app.state import AppState
+    from quotabubble.app.taskbar_main import demo_snapshots
+    from quotabubble.app.taskbar_settings import PanelSettings
+    from quotabubble.ui.taskbar_panel import TaskbarPanel
+
+    state = AppState()
+    state.replace(demo_snapshots())
+    settings = PanelSettings(theme=theme, transparent_background=transparent)
+    panel = TaskbarPanel(state, settings, preview=True)
+    try:
+        panel._update_appearance(system_light)
+        panel.show()
+        image = panel.grab().toImage()
+        scale = image.devicePixelRatio()
+        background = image.pixelColor(round(4 * scale), round(20 * scale))
+        assert panel._light is expected_light
+        if transparent:
+            assert background.alpha() == 0
+        else:
+            assert background.alpha() > 200
+            assert (background.red() > 200) is expected_light
+        # Even with no background, fully opaque provider-name glyphs remain
+        # readable and use the foreground selected by the theme.
+        ink = [
+            image.pixelColor(x, y)
+            for x in range(round(10 * scale), round(50 * scale))
+            for y in range(round(4 * scale), round(22 * scale))
+            if image.pixelColor(x, y).alpha() == 255
+        ]
+        assert ink
+        assert any((color.red() < 80) is expected_light for color in ink)
+    finally:
+        panel.close()
+        panel.popup.close()
