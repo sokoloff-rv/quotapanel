@@ -378,7 +378,7 @@ class TaskbarPanel(QWidget):
         foreground = QColor("#252b35" if self._light else "#edf1f7")
         muted = QColor("#667181" if self._light else "#a4adba")
         for index, snapshot in enumerate(self._state.ordered()[:2]):
-            top = padding + index * height
+            top = padding + index * (height - 2)
             painter.setPen(foreground)
             painter.drawText(
                 QRectF(10, top, name_width, height),
