@@ -59,7 +59,7 @@ def dock_rect(bar: Rect, screen: Rect, width: int, offset: int) -> Rect | None:
     width = min(max(220, width), bar.width - 24)
     if width < 220:
         return None
-    offset = min(max(8, offset), bar.width - width - 8)
+    offset = min(max(0, offset), bar.width - width - 8)
     height = min(44, bar.height - 4)
     return Rect(bar.x + offset, bar.y + (bar.height - height) // 2, width, height)
 

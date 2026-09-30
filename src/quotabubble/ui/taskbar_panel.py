@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QLabel,
-    QMenu,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -30,8 +33,10 @@ from quotabubble.app.taskbar_model import (
 from quotabubble.app.taskbar_settings import PanelSettings
 from quotabubble.presentation.formatting import format_age, format_reset
 from quotabubble.providers.base import ProviderStatus, UsageSnapshot
+from quotabubble.ui.taskbar_menu import TaskbarMenu
 
 COLORS = {"ok": "#64d5ba", "warning": "#efc164", "critical": "#ff7d88", "muted": "#a4adba"}
+logger = logging.getLogger(__name__)
 
 
 def _reset(value: datetime | None) -> str:
@@ -61,27 +66,32 @@ class DetailsPopup(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(18, 14, 18, 14)
         self._layout.setSpacing(9)
+        self._labels: list[QLabel] = []
+        refresh = QPushButton("Обновить квоты")
+        refresh.clicked.connect(self.refresh_requested.emit)
+        self._layout.addWidget(refresh)
+        setup = QPushButton("Настройки")
+        setup.clicked.connect(self.settings_requested.emit)
+        self._layout.addWidget(setup)
 
     def rebuild(self, note: str = "") -> None:
-        while self._layout.count():
-            item = self._layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        heading = QLabel("Квоты · осталось" if self._settings.remaining else "Квоты · использовано")
-        heading.setStyleSheet("font-size: 13pt; font-weight: 600;")
-        self._layout.addWidget(heading)
+        rows = [
+            (
+                "Квоты · осталось" if self._settings.remaining else "Квоты · использовано",
+                "font-size: 13pt; font-weight: 600;",
+                False,
+            )
+        ]
         for snapshot in self._state.ordered():
             name = PROVIDER_NAMES[snapshot.provider]
             if snapshot.plan:
                 name += f" · {snapshot.plan}"
-            title = QLabel(name)
-            title.setStyleSheet("font-weight: 600; margin-top: 6px;")
-            self._layout.addWidget(title)
+            rows.append((name, "font-weight: 600; margin-top: 6px;", False))
             if snapshot.status is not ProviderStatus.OK:
                 message = STATUS_TEXT.get(snapshot.status, "Нет данных")
                 if snapshot.status in {ProviderStatus.NO_CREDENTIALS, ProviderStatus.EXPIRED}:
                     message += " в Codex" if snapshot.provider == "codex" else " в Claude Code"
-                self._layout.addWidget(QLabel(message))
+                rows.append((message, "", True))
             for window in snapshot.windows:
                 label = {"session": "5 часов", "weekly": "Неделя"}.get(window.key, window.label)
                 if window.scope:
@@ -91,11 +101,9 @@ class DetailsPopup(QWidget):
                     f"{label}: {max(0, min(100, round(value)))}%"
                     f" · сброс через {_reset(window.resets_at)}"
                 )
-                line = QLabel(text)
-                line.setWordWrap(True)
-                self._layout.addWidget(line)
+                rows.append((text, "", True))
             if snapshot.stale:
-                self._layout.addWidget(QLabel("Сохранённые данные · обновить сейчас"))
+                rows.append(("Сохранённые данные · обновить сейчас", "", False))
             elif snapshot.fetched_at:
                 age = format_age(snapshot.fetched_at).replace("just now", "только что")
                 age = (
@@ -103,19 +111,34 @@ class DetailsPopup(QWidget):
                     .replace("h ago", "ч назад")
                     .replace("m ago", "м назад")
                 )
-                self._layout.addWidget(QLabel(f"Обновлено: {age}"))
+                rows.append((f"Обновлено: {age}", "", False))
         if note:
-            label = QLabel(note)
-            label.setWordWrap(True)
-            label.setStyleSheet("color: #efc164;")
-            self._layout.addWidget(label)
-        refresh = QPushButton("Обновить квоты")
-        refresh.clicked.connect(self.refresh_requested.emit)
-        self._layout.addWidget(refresh)
-        setup = QPushButton("Расположение и настройки")
-        setup.clicked.connect(self.settings_requested.emit)
-        self._layout.addWidget(setup)
-        self.adjustSize()
+            rows.append((note, "color: #efc164;", True))
+        for index, (text, style, wrap) in enumerate(rows):
+            if index == len(self._labels):
+                label = QLabel(self)
+                self._labels.append(label)
+                self._layout.insertWidget(index, label)
+            label = self._labels[index]
+            label.setText(text)
+            if label.styleSheet() != style:
+                label.setStyleSheet(style)
+            label.setWordWrap(wrap)
+            label.show()
+            label.ensurePolished()
+        for label in self._labels[len(rows):]:
+            label.hide()
+        # Resolve fonts and wrapping before the first show. Reuse widgets on
+        # countdown ticks so deferred deletes cannot disturb the layout.
+        self.ensurePolished()
+        self._layout.invalidate()
+        height = (
+            self._layout.totalHeightForWidth(self.width())
+            if self._layout.hasHeightForWidth()
+            else self._layout.sizeHint().height()
+        )
+        self.setFixedHeight(height)
+        self._layout.activate()
 
 
 class TaskbarPanel(QWidget):
@@ -128,9 +151,11 @@ class TaskbarPanel(QWidget):
         self._state = state
         self._settings = settings
         self._preview = preview
-        self._light = False
+        self._light = settings.theme == "light"
+        self._transparent = settings.transparent_background
         self._note = ""
         self._show_requested = not settings.hidden
+        self._placement_misses = 0
         self.setWindowTitle("QuotaPanel")
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -155,9 +180,28 @@ class TaskbarPanel(QWidget):
         self._countdown_timer = QTimer(self)
         self._countdown_timer.setInterval(15_000)
         self._countdown_timer.timeout.connect(self._tick_countdown)
+        self._order_timer = QTimer(self)
+        self._order_timer.setSingleShot(True)
+        self._order_timer.timeout.connect(self._restore_window_order)
+        self._order_watcher = None
+        if sys.platform == "win32" and not preview:
+            from quotabubble.platform.taskbar import TaskbarEventWatcher
+
+            self._order_watcher = TaskbarEventWatcher(self._schedule_window_order)
+            QApplication.instance().aboutToQuit.connect(self._order_watcher.stop)
         if not preview:
             self._dock_timer.start()
             self._countdown_timer.start()
+
+    def _schedule_window_order(self) -> None:
+        if self.isVisible() and not self._order_timer.isActive():
+            self._order_timer.start(0)
+
+    def _restore_window_order(self) -> None:
+        if self.isVisible() and self._show_requested:
+            from quotabubble.platform.taskbar import keep_above_taskbar
+
+            keep_above_taskbar(int(self.winId()))
 
     def _tick_countdown(self) -> None:
         self.update()
@@ -167,6 +211,22 @@ class TaskbarPanel(QWidget):
     @property
     def note(self) -> str:
         return self._note
+
+    def _update_appearance(self, system_light: bool) -> bool:
+        light = self._settings.theme == "light" or (
+            self._settings.theme == "system" and system_light
+        )
+        transparent = self._settings.transparent_background
+        changed = (light, transparent) != (self._light, self._transparent)
+        self._light, self._transparent = light, transparent
+        return changed
+
+    def apply_settings(self) -> None:
+        if self._preview:
+            self._update_appearance(self._light)
+        else:
+            self.sync_placement()
+        self.update()
 
     def sync_placement(self) -> None:
         if self._preview:
@@ -180,8 +240,11 @@ class TaskbarPanel(QWidget):
         info = taskbar_info()
         target = None
         note = ""
+        appearance_changed = False
         if info:
-            self._light = taskbar_is_light()
+            appearance_changed = self._update_appearance(
+                taskbar_is_light() if self._settings.theme == "system" else False
+            )
             screen = next(
                 (s for s in QGuiApplication.screens() if s.name() == info.device),
                 QGuiApplication.primaryScreen(),
@@ -221,16 +284,29 @@ class TaskbarPanel(QWidget):
                 "Панель временно скрыта: автоскрытие, полный экран "
                 "или неподдерживаемое положение панели задач."
             )
+        if target:
+            self._placement_misses = 0
+        elif self._show_requested and self.isVisible():
+            # A single transient Explorer/fullscreen observation must not
+            # make the overlay disappear and reappear on the next tick.
+            self._placement_misses += 1
+            if self._placement_misses < 2:
+                return
         if note != self._note:
             self._note = note
             self.placement_changed.emit(note)
         if target and self._show_requested:
-            self.setGeometry(target.x, target.y, target.width, target.height)
+            geometry = QRectF(target.x, target.y, target.width, target.height).toRect()
+            if self.geometry() != geometry:
+                self.setGeometry(geometry)
             if not self.isVisible():
                 self.show()
+                logger.info("panel shown")
             keep_above_taskbar(int(self.winId()))
-            self.update()
-        else:
+            if appearance_changed:
+                self.update()
+        elif self.isVisible():
+            logger.info("panel hidden: %s", note if self._show_requested else "user request")
             self.hide()
 
     def toggle_visible(self) -> None:
@@ -260,11 +336,18 @@ class TaskbarPanel(QWidget):
     def paintEvent(self, event: object) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        background = QColor("#f4f5f8" if self._light else "#20232b")
-        background.setAlpha(242)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawRoundedRect(QRectF(self.rect()), 7, 7)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        # Alpha-zero pixels on Windows layered windows pass clicks through.
+        # A single alpha step is visually transparent but keeps the entire
+        # rectangular panel clickable, including whitespace and its corners.
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if not self._transparent:
+            background = QColor("#f4f5f8" if self._light else "#20232b")
+            background.setAlpha(242)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(QRectF(self.rect()), 7, 7)
         font = QFont("Segoe UI")
         font.setPixelSize(12)
         painter.setFont(font)
@@ -338,7 +421,7 @@ class TaskbarPanel(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.show_details()
         elif event.button() == Qt.MouseButton.RightButton:
-            menu = QMenu(self)
+            menu = TaskbarMenu(self)
             menu.addAction("Обновить", self.refresh_requested.emit)
             menu.addAction("Настройки", self.settings_requested.emit)
             menu.exec(event.globalPosition().toPoint())
@@ -361,36 +444,59 @@ class TaskbarPanel(QWidget):
         self.setToolTip("\n".join(lines))
 
 
-def edit_placement(settings: PanelSettings, parent: QWidget | None = None) -> bool:
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("Расположение квот")
-    layout = QVBoxLayout(dialog)
-    note = QLabel(
-        "Разместите панель в свободном месте слева. "
-        "Она не резервирует место для кнопок Windows; "
-        "если они приближаются, уменьшите ширину."
-    )
-    note.setWordWrap(True)
-    layout.addWidget(note)
-    form = QFormLayout()
-    width = QSpinBox()
-    width.setRange(220, 420)
-    width.setValue(settings.width)
-    offset = QSpinBox()
-    offset.setRange(8, 4000)
-    offset.setValue(settings.offset)
-    form.addRow("Ширина", width)
-    form.addRow("Отступ слева", offset)
-    layout.addLayout(form)
-    buttons = QDialogButtonBox(
-        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-    )
-    buttons.accepted.connect(dialog.accept)
-    buttons.rejected.connect(dialog.reject)
-    layout.addWidget(buttons)
-    dialog.resize(390, 220)
+class PanelSettingsDialog(QDialog):
+    def __init__(self, settings: PanelSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Настройки QuotaPanel")
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Панель не резервирует место для кнопок Windows. "
+            "Если они приближаются, уменьшите ширину."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        self.width_input = QSpinBox()
+        self.width_input.setRange(220, 420)
+        self.width_input.setValue(settings.width)
+        self.offset_input = QSpinBox()
+        self.offset_input.setRange(0, 4000)
+        self.offset_input.setValue(settings.offset)
+        self.interval_input = QSpinBox()
+        self.interval_input.setRange(1, 60)
+        self.interval_input.setValue(settings.refresh_interval_minutes)
+        self.interval_input.setSuffix(" мин")
+        self.theme_input = QComboBox()
+        for text, value in (("Как в Windows", "system"), ("Тёмная", "dark"), ("Светлая", "light")):
+            self.theme_input.addItem(text, value)
+        self.theme_input.setCurrentIndex(self.theme_input.findData(settings.theme))
+        self.transparent_input = QCheckBox("Прозрачный фон")
+        self.transparent_input.setChecked(settings.transparent_background)
+        form.addRow("Ширина", self.width_input)
+        form.addRow("Отступ слева", self.offset_input)
+        form.addRow("Обновлять квоты каждые", self.interval_input)
+        form.addRow("Тема панели", self.theme_input)
+        form.addRow("", self.transparent_input)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(390, 290)
+
+    def apply(self, settings: PanelSettings) -> None:
+        settings.width = self.width_input.value()
+        settings.offset = self.offset_input.value()
+        settings.refresh_interval_minutes = self.interval_input.value()
+        settings.theme = self.theme_input.currentData()
+        settings.transparent_background = self.transparent_input.isChecked()
+
+
+def edit_settings(settings: PanelSettings, parent: QWidget | None = None) -> bool:
+    dialog = PanelSettingsDialog(settings, parent)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return False
-    settings.width, settings.offset = width.value(), offset.value()
-    settings.save()
+    dialog.apply(settings)
     return True
