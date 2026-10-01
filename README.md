@@ -40,6 +40,12 @@ QuotaPanel занимает свободное место слева от кно
 пояснение. В окне подробностей также видны дополнительные лимиты,
 если сервис их возвращает.
 
+## Скачать
+
+Свежая сборка для Windows автоматически собирается после каждого изменения в `master`:
+[QuotaPanel-windows-x64.zip](https://github.com/sokoloff-rv/quotapanel/releases/latest/download/QuotaPanel-windows-x64.zip).
+Распакуйте архив и запустите `QuotaPanel.exe`; папка `_internal` должна оставаться рядом.
+
 ## Перед запуском
 
 Войдите в Codex и Claude Code на этом компьютере.

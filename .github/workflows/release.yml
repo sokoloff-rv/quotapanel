@@ -1,34 +1,28 @@
 name: release
 
+# Every push to master rebuilds QuotaPanel and replaces the single rolling
+# "latest" release, so the newest build is always at
+# https://github.com/sokoloff-rv/quotapanel/releases/latest
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
+    paths-ignore:
+      - "**.md"
+      - "website/**"
+      - "docs/**"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# A newer push supersedes a build that is still running.
+concurrency:
+  group: release
+  cancel-in-progress: true
+
 jobs:
-  # Matrix of per-OS binary builds. Each entry tests, builds with PyInstaller,
-  # packages a platform-native artifact, and uploads it as a CI artifact.
-  # None of them publish anything themselves.
   build:
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: QuotaBubble-windows-x64.zip
-            spec: packaging/quotabubble.windows.spec
-          - os: macos-15-intel
-            artifact: QuotaBubble-macos-x64.dmg
-            spec: packaging/quotabubble.macos.spec
-          - os: macos-15
-            artifact: QuotaBubble-macos-arm64.dmg
-            spec: packaging/quotabubble.macos.spec
-          - os: ubuntu-24.04
-            artifact: QuotaBubble-linux-amd64.deb
-            spec: packaging/quotabubble.linux.spec
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -36,286 +30,34 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install Linux runtime dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes libegl1 libgl1 libglib2.0-0 libxkbcommon0
-
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Test
         run: uv run pytest -q
 
-      - name: Generate macOS icon
-        if: runner.os == 'macOS'
-        run: uv run python scripts/make_icon.py
-
       - name: Build
-        run: uv run pyinstaller --noconfirm ${{ matrix.spec }}
+        run: uv run pyinstaller --noconfirm packaging/quotapanel.windows.spec
 
-      - name: Package Windows build
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path dist/QuotaBubble/* -DestinationPath ${{ matrix.artifact }}
-
-      # The Store re-signs MSIX packages itself, so this one is submitted to
-      # Partner Center as-is and is not meant to be installed directly.
-      - name: Build Microsoft Store MSIX
-        if: runner.os == 'Windows'
-        run: uv run python scripts/build_msix.py --output QuotaBubble-windows-x64.msix
-
-      - name: Package Linux build
-        if: runner.os == 'Linux'
-        run: |
-          uv run python packaging/linux/package_deb.py \
-            --source dist/QuotaBubble-linux \
-            --output ${{ matrix.artifact }}
-
-      - name: Smoke test Linux package
-        if: runner.os == 'Linux'
-        run: |
-          mkdir extracted
-          dpkg-deb --extract ${{ matrix.artifact }} extracted
-          dbus-run-session -- bash -c '
-            PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
-              extracted/usr/lib/quotabubble/quotabubble-service &
-            service_pid=$!
-            trap "kill $service_pid" EXIT
-            for attempt in $(seq 1 20); do
-              gdbus call --session --dest dev.izzet.quotabubble \
-                --object-path /dev/izzet/quotabubble \
-                --method dev.izzet.quotabubble.Service1.GetState && exit 0
-              sleep 1
-            done
-            exit 1
-          '
-
-      # These initial public builds use PyInstaller's ad hoc signatures. Add
-      # Developer ID signing, notarization, and stapling here once the
-      # repository has the Apple Developer credentials required to do so.
-      - name: Package macOS build
-        if: runner.os == 'macOS'
-        run: hdiutil create -volname QuotaBubble -srcfolder dist/QuotaBubble.app -ov -format UDZO ${{ matrix.artifact }}
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
-
-      - name: Upload Microsoft Store MSIX
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: QuotaBubble-windows-x64.msix
-          path: QuotaBubble-windows-x64.msix
-
-  # Fan-in: waits for every platform in the build matrix, then creates ONE
-  # GitHub Release with all of their archives attached at once. Downstream
-  # per-channel jobs depend on this job, never on individual build entries,
-  # so they always see a fully-published release regardless of how many
-  # platforms are in the matrix.
-  github-release:
-    needs: build
-    runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/')
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: artifacts/*
-          body: |
-            `QuotaBubble-windows-x64.msix` is the package submitted to the Microsoft Store. It is not signed for direct installation, so on Windows use the ZIP, winget, Chocolatey, or Scoop instead.
-
-  winget:
-    needs: github-release
-    runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    env:
-      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
-    steps:
-      - name: Skip when WINGET_TOKEN is not configured
-        if: env.WINGET_TOKEN == ''
-        shell: pwsh
-        run: Write-Output "WINGET_TOKEN is not set; skipping winget submission."
-
-      - name: Download komac
-        if: env.WINGET_TOKEN != ''
+      - name: Package
         shell: pwsh
         run: |
-          $url = "https://github.com/RussellBanks/Komac/releases/download/v2.16.0/komac-2.16.0-x86_64-pc-windows-msvc.exe"
-          Invoke-WebRequest -Uri $url -OutFile komac.exe
+          Copy-Item LICENSE dist/QuotaPanel/
+          Compress-Archive -Path dist/QuotaPanel/* -DestinationPath QuotaPanel-windows-x64.zip
 
-      - name: Submit winget update
-        if: env.WINGET_TOKEN != ''
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          $zip = "https://github.com/izzet/quotabubble/releases/download/v$version/QuotaBubble-windows-x64.zip"
-          .\komac.exe update Izzet.QuotaBubble -v $version -u $zip --submit --token $env:WINGET_TOKEN
-
-  chocolatey:
-    needs: github-release
-    runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    env:
-      CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Skip when CHOCOLATEY_API_KEY is not configured
-        if: env.CHOCOLATEY_API_KEY == ''
-        shell: pwsh
-        run: Write-Output "CHOCOLATEY_API_KEY is not set; skipping Chocolatey submission."
-
-      - name: Pack and push
-        if: env.CHOCOLATEY_API_KEY != ''
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          $zipUrl = "https://github.com/izzet/quotabubble/releases/download/v$version/QuotaBubble-windows-x64.zip"
-          $iconUrl = "https://cdn.jsdelivr.net/gh/izzet/quotabubble@v$version/website/public/icon.png"
-          $releaseNotes = "https://github.com/izzet/quotabubble/releases/tag/v$version"
-
-          Invoke-WebRequest -Uri $zipUrl -OutFile QuotaBubble-windows-x64.zip
-          $checksum = (Get-FileHash QuotaBubble-windows-x64.zip -Algorithm SHA256).Hash
-
-          $installScript = "packaging/chocolatey/tools/chocolateyinstall.ps1"
-          (Get-Content $installScript -Raw) `
-            -replace '__URL__', $zipUrl `
-            -replace '__CHECKSUM__', $checksum |
-            Set-Content $installScript
-
-          $nuspec = "packaging/chocolatey/quotabubble.nuspec"
-          (Get-Content $nuspec -Raw) `
-            -replace '__ICON_URL__', $iconUrl `
-            -replace '__RELEASE_NOTES__', $releaseNotes |
-            Set-Content $nuspec
-
-          if ((Get-Content $nuspec -Raw) -match '__[A-Z]+__') {
-            throw "Unresolved Chocolatey package placeholder."
-          }
-
-          choco pack $nuspec --version $version --outputdirectory .
-          choco push "quotabubble.$version.nupkg" --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
-
-
-  homebrew:
-    needs: github-release
-    runs-on: macos-15
-    if: startsWith(github.ref, 'refs/tags/v')
-    env:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Skip when HOMEBREW_TAP_TOKEN is not configured
-        if: env.HOMEBREW_TAP_TOKEN == ''
-        run: echo "HOMEBREW_TAP_TOKEN is not set; skipping Homebrew tap update."
-
-      - uses: actions/checkout@v7
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        with:
-          repository: izzet/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-
-      - name: Download macOS release artifacts
-        if: env.HOMEBREW_TAP_TOKEN != ''
+      - name: Publish rolling release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir artifacts
-          gh release download "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir artifacts \
-            --pattern 'QuotaBubble-macos-*.dmg'
+          short=$(git rev-parse --short HEAD)
+          subject=$(git log -1 --format=%s)
+          notes="Build of \`${short}\`: ${subject}
 
-      - name: Update cask
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        run: |
-          python3 - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-
-          def sha256(path: str) -> str:
-              digest = hashlib.sha256()
-              with Path(path).open("rb") as artifact:
-                  for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              return digest.hexdigest()
-
-          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
-          replacements = {
-              "__VERSION__": version,
-              "__ARM64_SHA256__": sha256("artifacts/QuotaBubble-macos-arm64.dmg"),
-              "__X64_SHA256__": sha256("artifacts/QuotaBubble-macos-x64.dmg"),
-          }
-          cask = Path("packaging/homebrew/quotabubble.rb.tmpl").read_text()
-          for placeholder, value in replacements.items():
-              cask = cask.replace(placeholder, value)
-          Path("homebrew-tap/Casks").mkdir(parents=True, exist_ok=True)
-          Path("homebrew-tap/Casks/quotabubble.rb").write_text(cask)
-          PY
-          brew tap izzet/tap
-          # Homebrew refuses to load casks from a tap it hasn't been told to trust.
-          brew trust izzet/tap
-          tap_path="$(brew --repository izzet/tap)"
-          cp homebrew-tap/Casks/quotabubble.rb "$tap_path/Casks/quotabubble.rb"
-          brew audit --cask --strict quotabubble
-
-      - name: Commit cask update
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        working-directory: homebrew-tap
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/quotabubble.rb
-          git diff --cached --quiet || git commit -m "quotabubble ${VERSION#v}"
-          git push
-
-  pypi:
-    # Deliberately no `needs:` on build/github-release: the published wheel
-    # is pure Python (py3-none-any, no compiled extensions), so it's
-    # identical regardless of which OS built it and doesn't depend on any
-    # platform-specific binary succeeding. Its own commit already went
-    # through the full test suite via ci.yml before being merged to main,
-    # so this job only needs to verify the *built wheel* is sound, not
-    # re-run the whole suite.
-    #
-    # That verification deliberately isn't the full pytest suite either:
-    # PySide6 needs system libraries (libGL, libglib, etc.) this runner
-    # doesn't have, and installing them just to satisfy Qt imports the
-    # package itself doesn't need here would be testing the wrong thing.
-    # A plain import of a non-Qt module is enough to catch real packaging
-    # mistakes (missing package data, broken entry points, bad metadata).
-    runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/v')
-    environment: pypi
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: astral-sh/setup-uv@v10.2.0
-
-      - name: Build
-        run: uv build
-
-      - name: Smoke test the built wheel
-        run: |
-          uv venv /tmp/smoke
-          uv pip install --python /tmp/smoke/bin/python dist/*.whl
-          /tmp/smoke/bin/python -c "from quotabubble.app.settings import Settings; Settings()"
-
-      - name: Publish to PyPI
-        run: uv publish --trusted-publishing always
+          Unzip and run \`QuotaPanel.exe\`. Keep the \`_internal\` folder next to it."
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest QuotaPanel-windows-x64.zip \
+            --target "$GITHUB_SHA" \
+            --title "QuotaPanel (latest build)" \
+            --notes "$notes" \
+            --latest
