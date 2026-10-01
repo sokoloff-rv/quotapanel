@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from quotabubble.providers.base import (
     format_plan,
     parse_retry_after,
 )
+from quotabubble.providers.claude_auth import RefreshResult, refresh_credentials_file
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 ANTHROPIC_BETA = "oauth-2025-04-20"
@@ -31,6 +33,8 @@ KEYCHAIN_CREDENTIAL_HINT = "Claude Code-credentials"
 class _Credentials(BaseModel):
     access_token: str
     subscription_type: str | None = None
+    refresh_token: str | None = None
+    expires_at_ms: float | None = None
 
 
 class _Bucket(BaseModel):
@@ -98,9 +102,12 @@ def _parse_credentials(raw: object) -> _Credentials | None:
     if not isinstance(token, str) or not token:
         return None
     subscription = oauth.get("subscriptionType")
+    refresh = oauth.get("refreshToken")
     return _Credentials(
         access_token=token,
         subscription_type=subscription if isinstance(subscription, str) else None,
+        refresh_token=refresh if isinstance(refresh, str) and refresh else None,
+        expires_at_ms=as_number(oauth.get("expiresAt")),
     )
 
 
@@ -250,39 +257,52 @@ class ClaudeProvider:
         credentials_path: Path | None = None,
         keychain_credentials_provider: Callable[[str], list[tuple[str, bytes]]] | None = None,
         client: httpx2.Client | None = None,
+        now: Callable[[], float] = time.time,
     ) -> None:
         self._credentials_path = credentials_path or default_credentials_path()
         self._keychain_credentials_provider = (
             keychain_credentials_provider or enumerate_generic_credentials
         )
         self._client = client
+        self._now = now
+        self._rejected_access_token: str | None = None
+        self._rejected_refresh_token: str | None = None
 
-    def _credentials(self) -> _Credentials | None:
+    def _load_credentials(self) -> tuple[_Credentials | None, bool]:
+        """Return the credentials and whether they can be refreshed in place."""
         if sys.platform == "darwin":
             keychain_credentials = read_keychain_credentials(
                 self._keychain_credentials_provider
             )
             if keychain_credentials is not None:
-                return keychain_credentials
-        return read_credentials(self._credentials_path)
+                return keychain_credentials, False
+        return read_credentials(self._credentials_path), True
 
     def detect(self) -> bool:
-        return self._credentials() is not None
+        return self._load_credentials()[0] is not None
 
     def fetch(self) -> UsageSnapshot:
-        credentials = self._credentials()
+        credentials, refreshable = self._load_credentials()
         if credentials is None:
             return self._snapshot(
                 ProviderStatus.NO_CREDENTIALS, "No Claude Code credentials found"
             )
 
-        headers = {
-            "Authorization": f"Bearer {credentials.access_token}",
-            "anthropic-beta": ANTHROPIC_BETA,
-        }
         client = self._client or httpx2.Client(timeout=REQUEST_TIMEOUT_SECONDS)
         try:
-            response = client.get(USAGE_URL, headers=headers)
+            if self._is_expired(credentials):
+                refreshed = self._refresh(client, credentials, refreshable)
+                if isinstance(refreshed, UsageSnapshot):
+                    return refreshed
+                credentials = refreshed
+            response = self._get_usage(client, credentials)
+            if response.status_code in (401, 403):
+                self._rejected_access_token = credentials.access_token
+                refreshed = self._refresh(client, credentials, refreshable)
+                if isinstance(refreshed, UsageSnapshot):
+                    return refreshed
+                credentials = refreshed
+                response = self._get_usage(client, credentials)
         except httpx2.HTTPError as exc:
             return self._snapshot(ProviderStatus.ERROR, str(exc))
         finally:
@@ -290,7 +310,8 @@ class ClaudeProvider:
                 client.close()
 
         if response.status_code in (401, 403):
-            return self._snapshot(ProviderStatus.EXPIRED, "Sign in with Claude Code again")
+            self._rejected_access_token = credentials.access_token
+            return self._expired()
         if response.status_code == 429:
             return self._snapshot(
                 ProviderStatus.ERROR,
@@ -312,6 +333,44 @@ class ClaudeProvider:
             credits=_credits(parsed.spend),
             plan=format_plan(credentials.subscription_type),
         )
+
+    def _is_expired(self, credentials: _Credentials) -> bool:
+        if credentials.access_token == self._rejected_access_token:
+            return True
+        expires_at = credentials.expires_at_ms
+        return expires_at is not None and expires_at <= self._now() * 1000
+
+    def _get_usage(self, client: httpx2.Client, credentials: _Credentials) -> httpx2.Response:
+        headers = {
+            "Authorization": f"Bearer {credentials.access_token}",
+            "anthropic-beta": ANTHROPIC_BETA,
+        }
+        return client.get(USAGE_URL, headers=headers)
+
+    def _refresh(
+        self, client: httpx2.Client, credentials: _Credentials, refreshable: bool
+    ) -> _Credentials | UsageSnapshot:
+        """Return fresh credentials, or the snapshot to report when that is impossible."""
+        refresh_token = credentials.refresh_token
+        if (
+            not refreshable
+            or refresh_token is None
+            or refresh_token == self._rejected_refresh_token
+        ):
+            return self._expired()
+        result = refresh_credentials_file(
+            self._credentials_path, client, now_ms=self._now() * 1000
+        )
+        if result is RefreshResult.REJECTED:
+            self._rejected_refresh_token = refresh_token
+            return self._expired()
+        refreshed = read_credentials(self._credentials_path)
+        if result is RefreshResult.FAILED or refreshed is None:
+            return self._snapshot(ProviderStatus.ERROR, "Token refresh failed")
+        return refreshed
+
+    def _expired(self) -> UsageSnapshot:
+        return self._snapshot(ProviderStatus.EXPIRED, "Sign in with Claude Code again")
 
     def _snapshot(
         self,
